@@ -375,8 +375,8 @@ def takePhoto_Manual():
     global middleexposure, calib_lens_position, calib_exposure
     # LensPosition: Manual focus, Set the lens position.
     now = datetime.now()
-    timestamp = now.strftime("%Y_%m_%d__%H_%M_%S")  # Adjust the format as needed
-    #timestamp = now.strftime("%y%m%d%H%M%S")
+    # timestamp = now.strftime("%Y_%m_%d__%H_%M_%S")  # Adjust the format as needed
+    timestamp = now.strftime("%y%m%d%H%M%S")
     #serial_number = get_serial_number()
     #lastfivedigits=serial_number[-5:]
 
