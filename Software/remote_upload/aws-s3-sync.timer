@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AWS S3 sync every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=1s
+Unit=aws-s3-sync.service
+
+[Install]
+WantedBy=timers.target

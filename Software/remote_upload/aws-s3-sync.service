@@ -1,0 +1,26 @@
+[Unit]
+Description=AWS S3 Sync Service
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/home/pi/Desktop/mothbox-mihow/Software/remote_upload/aws-s3-sync.py
+# Don't wait for long initial sync when restarting
+RemainAfterExit=yes
+TimeoutStartSec=600
+User=pi
+Group=pi
+
+# Environment variables for AWS configuration
+# Environment=AWS_ACCESS_KEY_ID=your_access_key
+# Environment=AWS_SECRET_ACCESS_KEY=your_secret_key
+Environment=AWS_DEFAULT_REGION=not-appliable-for-drac
+Environment=AWS_ENDPOINT_URL=https://object-arbutus.cloud.computecanada.ca
+Environment=AWS_BUCKET=ami-trapdata
+Environment=AWS_PREFIX=michael/oahu
+
+[Install]
+WantedBy=multi-user.target
