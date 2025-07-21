@@ -1,0 +1,30 @@
+# photo-backup.service
+# Place this file in /etc/systemd/system/
+
+[Unit]
+Description=Raspberry Pi Photo Backup Service
+# Wait for the SD card to be mounted
+After=media-pi-sdcard.mount
+# Add dependency on the network if needed
+# After=network.target
+
+[Service]
+Type=simple
+# Update these paths to match your setup
+ExecStart=/usr/local/bin/photo_backup.py --src /home/pi/photos/ --dest /media/pi/sdcard/photos_backup/ --bwlimit 20000
+# Run as the pi user
+User=pi
+Group=pi
+# Working directory
+WorkingDirectory=/home/pi
+# Restart policy
+Restart=on-failure
+RestartSec=60s
+# Add a nice value to lower CPU priority
+Nice=10
+# Output handling
+StandardOutput=append:/home/pi/photo-backup-output.log
+StandardError=append:/home/pi/photo-backup-error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,458 +1,498 @@
-#!/usr/bin/python
-
+#!/usr/bin/env python3
 """
-Backupper Script
-This script is for folks collecting lots of data automatically that needs to get backed up at certain intervals
-for instance saving a bunch of files to a folder, but then automatically copying them to larger external devices
-This script first defines paths for the desktop, photos folder, and backup folder name. Then, it defines functions to:
+Raspberry Pi Optimized Photo Backup
 
-    Get the storage information (total and available space) of a path.
-    Find the sizes of all external devices in terms of total storage capacity (not available because this will change)
-    Rank them in order  of their total storage capacity
-    Check if the first option has space available to copy the new files
-      if not, choose the next option in terms of total storage
-    Copy all the files from the internal storage to the external storage
-    Move the files from the directory of "fresh" files to the internal "backedup" folder
-    if the internal storage gets too small, delete the internal "backedup" folder
-Finally, the script checks if the photos folder exists and then finds the largest external storage. It compares the total space and available space on both the desktop and the external storage to determine if the external storage has enough space for the backup. If so, it creates a backup folder on the external storage and copies the photos. Otherwise, it informs the user about insufficient space.
+A script designed to efficiently transfer large photo files (~20MB each) from a Raspberry Pi's
+ext4 SD card to an external exFAT SD card. The script addresses several performance issues:
 
-Note:
-    This script assumes the user running the script has read and write permissions to the desktop and any external storage devices.
-    You might need to adjust the user name in desktop_path depending on your Raspberry Pi setup.
-"""
-import os
-import subprocess
-import shutil
-import psutil
-from pathlib import Path
-from datetime import datetime
-import sys
+Problem:
+- Very slow write speeds when copying files to exFAT SD card
+- Multiple Python processes running simultaneously due to cron job running too frequently
+- Files getting locked during transfer
+- High CPU usage causing system to slow down
 
-# Define paths
-desktop_path = Path(
-    "/home/pi/Desktop/Mothbox"
-)  # Assuming user is "pi" on your Raspberry Pi
-photos_folder = desktop_path / "photos"
-logs_folder = desktop_path / "logs"
-backedup_photos_folder = desktop_path / "photos_backedup"
+Solution:
+- Uses rsync with optimized parameters for Raspberry Pi and exFAT file systems
+- Implements a lock file to prevent multiple instances from running simultaneously
+- Bandwidth limiting to prevent CPU from being overwhelmed
+- Proper logging of all operations
+- Handles interruptions gracefully
+- Command-line interface for flexibility
+- Shows disk space and transfer progress
 
-backup_folder_name = "photos_backup"
-internal_storage_minimum = 5 # This is Gigabytes, below 4 on a raspberry pi 4, can make weird OS problems
+Recommended fstab entry for exFAT SD card:
+/dev/sdb1  /media/pi/sdcard  exfat  rw,uid=1000,gid=1000,umask=000,fmask=0000,dmask=0000,nofail,noatime  0  2
 
-print("----------------- STARTING BACKUP FILES-------------------")
-now = datetime.now()
-formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")  # Adjust the format as needed
+Explanations of fstab options:
+- rw: Mount with read/write access
+- uid=1000,gid=1000: Set ownership to the Pi user (1000 is typically Pi's user/group ID)
+- umask=000,fmask=0000,dmask=0000: Set full permissions for files and directories
+- nofail: Skip this entry during boot if the device isn't present (prevents boot hangs)
+- noatime: Don't update access time on files (improves performance)
 
-print(f"Current time: {formatted_time}")
+Requirements:
+- rsync must be installed on the system
+- Python 3.6+
 
-def get_storage_info(path):
-    """
-    Gets the total and available storage space of a path.
-    Args:
-        path: The path to the storage device.
-
-    Returns:
-        A tuple containing the total and available storage in bytes.
-    """
-    try:
-        stat = os.statvfs(path)
-        return stat.f_blocks * stat.f_bsize, stat.f_bavail * stat.f_bsize
-    except OSError:
-        return 0, 0  # Handle non-existent or inaccessible storages
-
-def find_largest_external_storage():
-    """
-    Finds the largest external storage device connected to the Raspberry Pi.
-    Returns:
-        The path to the largest storage device or None if none is found.
-    """
-    largest_storage = None
-    largest_size = 0
-
-    for mount_point in os.listdir("/media/pi"):
-        path = Path(f"/media/pi/{mount_point}")
-        # Check if the mount point is actually mounted
-        if is_mounted(path):
-            if path.is_dir():
-                total_size, available_size = get_storage_info(path)
-                print(path)
-                print(available_size)
-                if available_size > largest_size:
-                    largest_storage = path
-                    largest_size = available_size
-            """
-      if total_size > largest_size:
-        largest_storage = path
-        largest_size = total_size
-      """
-    print("Largest Storage: " + str(largest_storage))
-    print(largest_size)
-    return largest_storage
-
-def is_mounted(path):
-  """
-  Checks if the given path is currently mounted.
-  Args:
-      path: The path to check for mount status.
-
-  Returns:
-      True if the path is mounted, False otherwise.
-  """
-  # Use psutil library to check mounted devices
-  partitions = psutil.disk_partitions()
-  for partition in partitions:
-    if partition.mountpoint == str(path):
-      return True
-  return False
-
-def rsync_photos_to_backup(source_dir, dest_dir):
-    if not os.path.exists(dest_dir):
-        os.makedirs(dest_dir)
-    #if you don't want as many slow print commands, turn off verbose mode
-    rsync_cmd = ["rsync", "-avz", str(source_dir) + "/", dest_dir]
-    # Call rsync using subprocess
-    try:
-        process = subprocess.run(rsync_cmd, check=True)
-    except subprocess.CalledProcessError as err:
-        raise RuntimeError(f"Oh no! Mothbox couldn't backup your files!") from err
-
-def rsync_copy_and_delete_files(source_dir, dest_dir):
-    """
-    This function uses rsync to copy files from source_dir to dest_dir and then deletes the originals from source_dir if successful.
-    Args:
-      source_dir: The source directory containing the files to copy.
-      dest_dir: The destination directory to copy the files to.
-
-    Raises:
-      subprocess.CalledProcessError: If the rsync command fails.
-    """
-    if not os.path.exists(dest_dir):
-        os.makedirs(dest_dir)
-
-    # Build the rsync command with options for recursive copy, delete on source, and verbose output    
-    rsync_cmd = ["rsync", "-avz", str(source_dir) + "/", dest_dir]
-
-    # Call rsync using subprocess
-    process = subprocess.run(rsync_cmd, check=True)
-
-    # If successful, iterate through copied files and delete them individually
-    if process.returncode == 0:
-        for root, _, files in os.walk(source_dir):
-            for filename in files:
-                source_file = os.path.join(root, filename)
-                dest_file = os.path.join(dest_dir, filename)
-                # Check if the file was successfully copied (exists in destination)
-                if os.path.isfile(dest_file):
-                    try:
-                        os.remove(source_file)
-                        #print(f"Deleted: {source_file}")
-                    except OSError as e:
-                        print(f"Error deleting {source_file}: {e}")
-
-    return process.returncode
-def move_folder_contents(source_folder, destination_folder):
-  """
-  Moves the entire contents of a folder to a new folder, overwriting existing files.
-  Args:
-      source_folder (str): Path to the source folder.
-      destination_folder (str): Path to the destination folder.
-  """
-  print("moving folder contents")
-  for filename in os.listdir(source_folder):
-    source_path = os.path.join(source_folder, filename)
-    destination_path = os.path.join(destination_folder, filename)
-
-    if os.path.isfile(source_path):
-      # Move the file, overwrite if exists
-      shutil.move(source_path, destination_path)
-    elif os.path.isdir(source_path):
-      # Create destination directory if it doesn't exist
-      os.makedirs(destination_path, exist_ok=True)
-      os.chmod(destination_path, 0o777)
-      # Recursively move contents of subfolders
-      move_folder_contents(source_path, destination_path)
-    else:
-      print(f"Skipping unknown item: {filename}")
-
-def move_photos_to_backup(source_folder, target_folder):
-  """
-  Copies all files and subfolders from the source folder to the target folder recursively,
-  handling existing dated folders and copying their contents.
-  Args:
-      source_folder: The path to the source folder.
-      target_folder: The path to the target folder.
-  """
-  if not os.path.exists(target_folder):
-    os.makedirs(target_folder)
-  os.chmod(target_folder, 0o777)  # mode=0o777 for read write for all users
-  # Move all contents (files and subfolders)
-  try:
-    shutil.move(source_folder, target_folder)
-    print("Contents moved successfully!")
-    
-    #recreate the empty photos folder
-    if not os.path.exists(source_folder):
-        os.makedirs(source_folder)
-    os.chmod(source_folder, 0o777)
-  except OSError as e:
-    print("Error moving contents:", e)
+Usage:
+  python3 photo_backup.py --src /path/to/source --dest /path/to/destination
   
-def copy_photos_to_backup(source_folder, target_folder):
-  """
-  Copies all files and subfolders from the source folder to the target folder recursively,
-  handling existing dated folders and copying their contents.
-  Args:
-      source_folder: The path to the source folder.
-      target_folder: The path to the target folder.
-  """
-  if not os.path.exists(target_folder):
-    os.makedirs(target_folder)
-  os.chmod(target_folder, 0o777)  # mode=0o777 for read write for all users
+  Optional arguments:
+  --bwlimit   Set bandwidth limit in KB/s (default: 20000 KB/s)
+  --log-file  Path to log file (default: ~/photo-backup.log)
+  --verbose   Display verbose output
+"""
 
-  for item in os.listdir(source_folder):
-    source_path = os.path.join(source_folder, item)
-    target_path = os.path.join(target_folder, item)
+import argparse
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, List, Dict, Union, Tuple
 
-    if os.path.isfile(source_path):
-      shutil.copy2(source_path, target_path)  # Copy files
-      os.chmod(target_path, 0o777)  # Set permissions for copied files
-    else:
-      # Handle existing dated folders
-      if not os.path.exists(target_path):
-        shutil.copytree(source_path, target_path)  # Copy subdirectory if not exists
-      else:
-        # Copy contents of existing subdirectory
-        for inner_item in os.listdir(source_path):
-          inner_source_path = os.path.join(source_path, inner_item)
-          inner_target_path = os.path.join(target_path, inner_item)
-          if os.path.isfile(inner_source_path):
-            shutil.copy2(inner_source_path, inner_target_path)
-            os.chmod(inner_target_path, 0o777)  # Set permissions for copied files
+# Constants
+LOCK_FILE = "/tmp/photo_backup.lock"
+DEFAULT_BANDWIDTH_LIMIT = 20000  # KB/s (20MB/s)
+DEFAULT_LOG_FILE = os.path.expanduser("~/photo-backup.log")
 
-def verify_copy(source_folder, destination_folder):
-  """
-  Compares the contents of a source folder and its subdirectories with the destination folder to verify successful copy.
-  Args:
-      source_folder: The path to the source folder.
-      destination_folder: The path to the destination folder.
-  Returns:
-      A list of any differences found between the source and destination folders.
-  """
-  source_path = Path(source_folder)
-  dest_path = Path(destination_folder)
-  differences = []
 
-  # Check if source folder exists
-  if not source_path.exists():
-    differences.append(f"Error: Source folder '{source_folder}' does not exist.")
-    return differences
-
-  # Compare files and subdirectories recursively
-  for root, dirs, files in os.walk(source_path):
-    rel_path = os.path.relpath(root, source_path)
-    dest_dir = os.path.join(dest_path, rel_path)
-
-    # Check if corresponding directory exists in destination
-    if not os.path.exists(dest_dir):
-      differences.append(f"Missing directory in destination: {dest_dir}")
-      continue
-
-    # Compare files within the directory
-    for filename in files:
-      source_file = os.path.join(root, filename)
-      dest_file = os.path.join(dest_dir, filename)
-
-      # Check if file exists in destination
-      if not os.path.isfile(dest_file):
-        differences.append(f"Missing file in destination: {dest_file}")
-  return differences
-
-def delete_folder_contents(folder_path):
-  """
-  Deletes all contents (files and subdirectories) from a folder.
-  Args:
-      folder_path: The path to the folder to be emptied.
-  """
-  for root, dirs, files in os.walk(folder_path, topdown=False):
-    for filename in files:
-      file_path = os.path.join(root, filename)
-      os.remove(file_path)
-    for dir in dirs:
-      dir_path = os.path.join(root, dir)
-      os.rmdir(dir_path)
-
-def delete_original_photos(source_folder):
+class PhotoBackup:
     """
-    Deletes all files from the source folder.
-    Args:
-        source_folder: The path to the source folder.
+    Manages the efficient transfer of photos from source to destination using rsync
+    with optimized parameters for Raspberry Pi and exFAT file systems.
     """
-    print("trying to delete fresh")
-    for filename in os.listdir(source_folder):
-        file_path = os.path.join(source_folder, filename)
-        try:
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        except OSError as e:
-            print(f"Error deleting file {file_path}: {e}")
+    
+    def __init__(
+        self,
+        source_dir: str,
+        dest_dir: str,
+        bandwidth_limit: int = DEFAULT_BANDWIDTH_LIMIT,
+        log_file: str = DEFAULT_LOG_FILE,
+        verbose: bool = False
+    ) -> None:
+        """
+        Initialize the backup manager with source and destination directories.
+        
+        Args:
+            source_dir: Source directory containing photos to back up
+            dest_dir: Destination directory where photos will be copied
+            bandwidth_limit: Maximum bandwidth to use in KB/s
+            log_file: Path to log file
+            verbose: Whether to display verbose output
+        """
+        self.source_dir = self._ensure_trailing_slash(source_dir)
+        self.dest_dir = self._ensure_trailing_slash(dest_dir)
+        self.bandwidth_limit = bandwidth_limit
+        self.log_file = log_file
+        self.verbose = verbose
+        
+        # Set up logging
+        self._setup_logging()
+        
+    def _ensure_trailing_slash(self, path: str) -> str:
+        """Ensure the path ends with a trailing slash."""
+        if not path.endswith('/'):
+            return path + '/'
+        return path
+    
+    def _setup_logging(self) -> None:
+        """Configure the logging system."""
+        # Reset any existing handlers
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
             
-def get_dir_size(dir_path):
-  """
-  Calculates the total size of a directory and its subdirectories.
-  Args:
-      dir_path: The path to the directory.
-  Returns:
-      The total size of the directory in bytes.
-  """
-  total_size = 0
-  for dirpath, dirnames, filenames in os.walk(dir_path):
-    for filename in filenames:
-      file_path = os.path.join(dirpath, filename)
-      if not os.path.islink(file_path):  # Skip symbolic links (optional)
-        total_size += os.path.getsize(file_path)
-  return total_size
+        # Configure logging with custom formatting
+        log_format = '%(asctime)s - %(levelname)s - %(message)s'
+        
+        # Create a file handler
+        file_handler = logging.FileHandler(self.log_file)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        file_handler.setLevel(logging.DEBUG if self.verbose else logging.INFO)
+        
+        # Create a console handler that only shows INFO and above
+        # This ensures important messages show up in headless mode
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(logging.Formatter(log_format))
+        console_handler.setLevel(logging.INFO)
+        
+        # Configure root logger
+        logging.root.setLevel(logging.DEBUG if self.verbose else logging.INFO)
+        logging.root.addHandler(file_handler)
+        logging.root.addHandler(console_handler)
+    
+    def _create_lock(self) -> bool:
+        """
+        Create a lock file to prevent multiple instances from running.
+        
+        Returns:
+            True if lock was created successfully, False if another instance is running
+        """
+        if os.path.exists(LOCK_FILE):
+            # Check if the lock file is stale (older than 3 hours)
+            lock_time = os.path.getmtime(LOCK_FILE)
+            current_time = time.time()
+            if current_time - lock_time > 10800:  # 3 hours in seconds
+                logging.warning("Found stale lock file. Removing and continuing.")
+                os.remove(LOCK_FILE)
+            else:
+                logging.warning("Another backup process is already running. Exiting.")
+                return False
+        
+        try:
+            with open(LOCK_FILE, 'w') as f:
+                f.write(str(os.getpid()))
+            return True
+        except Exception as e:
+            logging.error(f"Failed to create lock file: {e}")
+            return False
+    
+    def _remove_lock(self) -> None:
+        """Remove the lock file if it exists."""
+        if os.path.exists(LOCK_FILE):
+            try:
+                os.remove(LOCK_FILE)
+            except Exception as e:
+                logging.error(f"Failed to remove lock file: {e}")
+    
+    def _validate_directories(self) -> bool:
+        """
+        Validate source and destination directories exist.
+        
+        Returns:
+            True if both directories exist, False otherwise
+        """
+        if not os.path.isdir(self.source_dir):
+            logging.error(f"Source directory does not exist: {self.source_dir}")
+            return False
+        
+        if not os.path.isdir(self.dest_dir):
+            try:
+                logging.info(f"Destination directory does not exist. Creating: {self.dest_dir}")
+                os.makedirs(self.dest_dir, exist_ok=True)
+            except Exception as e:
+                logging.error(f"Failed to create destination directory: {e}")
+                return False
+        
+        return True
+    
+    def _build_rsync_command(self) -> List[str]:
+        """
+        Build the rsync command with optimized parameters.
+        
+        Returns:
+            List of command arguments for subprocess
+        """
+        rsync_cmd = [
+            "rsync",
+            "-avh",              # Archive mode, verbose, human-readable sizes
+            "--size-only",       # Skip files of the same size (faster than checksum)
+            "--modify-window=2", # Allow 2-second timestamp difference
+            "--whole-file",      # Transfer whole files, don't use delta-transfer
+            "--no-compress",     # Disable compression (photos are already compressed)
+            "--partial",         # Keep partially transferred files if interrupted
+            "--timeout=300",     # 5-minute timeout for unresponsive operations
+            "--info=progress2",  # Show overall progress information
+            "--stats",           # Show detailed transfer statistics
+            f"--bwlimit={self.bandwidth_limit}",  # Limit bandwidth
+            "--max-delete=0",    # Safety feature: prevent mass deletions
+            f"--log-file={self.log_file}",  # Log to file
+            "--remove-source-files",  # Delete source files after successful transfer
+            self.source_dir,     # Source directory
+            self.dest_dir        # Destination directory
+        ]
+        return rsync_cmd
+    
+    def _get_disk_space(self, path: str) -> Dict[str, Union[int, float, str]]:
+        """
+        Get disk space information for a given path.
+        
+        Args:
+            path: Directory path to check
+            
+        Returns:
+            Dictionary with total, used, free space in bytes and human-readable format
+        """
+        try:
+            total, used, free = shutil.disk_usage(path)
+            return {
+                'total_bytes': total,
+                'used_bytes': used,
+                'free_bytes': free,
+                'total_human': self._format_size(total),
+                'used_human': self._format_size(used),
+                'free_human': self._format_size(free),
+                'used_percent': round(used / total * 100, 1)
+            }
+        except Exception as e:
+            logging.error(f"Error getting disk space for {path}: {e}")
+            return {
+                'total_bytes': 0,
+                'used_bytes': 0,
+                'free_bytes': 0,
+                'total_human': '0B',
+                'used_human': '0B',
+                'free_human': '0B',
+                'used_percent': 0
+            }
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """Format bytes to human-readable size."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024 or unit == 'TB':
+                return f"{size_bytes:.1f}{unit}"
+            size_bytes /= 1024
+    
+    def _get_dir_size(self, path: str) -> Dict[str, Union[int, str]]:
+        """
+        Get the size of a directory and count of files.
+        
+        Args:
+            path: Directory path to check
+            
+        Returns:
+            Dictionary with size in bytes, human-readable format, and file count
+        """
+        try:
+            total_size = 0
+            file_count = 0
+            
+            for dirpath, _, filenames in os.walk(path):
+                file_count += len(filenames)
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.isfile(fp) and not os.path.islink(fp):
+                        total_size += os.path.getsize(fp)
+            
+            return {
+                'size_bytes': total_size,
+                'size_human': self._format_size(total_size),
+                'file_count': file_count
+            }
+        except Exception as e:
+            logging.error(f"Error getting directory size for {path}: {e}")
+            return {
+                'size_bytes': 0,
+                'size_human': '0B',
+                'file_count': 0
+            }
+    
+    def _display_progress(self, process, stop_event):
+        """
+        Display progress information periodically.
+        
+        Args:
+            process: The subprocess running rsync
+            stop_event: Threading event to signal when to stop
+        """
+        # Track progress
+        transferred_bytes = 0
+        last_update_time = time.time()
+        speed = 0
+        
+        # Progress parsing regex patterns
+        progress_pattern = re.compile(r'(\d+)%')
+        speed_pattern = re.compile(r'(\d+\.\d+\w+/s)')
+        file_pattern = re.compile(r'to-chk=(\d+)/(\d+)')
+        
+        try:
+            while not stop_event.is_set():
+                # Display disk space every 30 seconds
+                if time.time() - last_update_time >= 30:
+                    src_space = self._get_disk_space(self.source_dir)
+                    dest_space = self._get_disk_space(self.dest_dir)
+                    src_size = self._get_dir_size(self.source_dir)
+                    dest_size = self._get_dir_size(self.dest_dir)
+                    
+                    logging.info(
+                        f"Source: {src_size['file_count']} files, "
+                        f"{src_size['size_human']} | "
+                        f"Dest: {dest_size['file_count']} files, "
+                        f"{dest_size['size_human']}"
+                    )
+                    logging.info(
+                        f"Disk space - Source: {src_space['used_human']}/{src_space['total_human']} "
+                        f"({src_space['used_percent']}%) | "
+                        f"Destination: {dest_space['used_human']}/{dest_space['total_human']} "
+                        f"({dest_space['used_percent']}%)"
+                    )
+                    
+                    last_update_time = time.time()
+                
+                time.sleep(5)
+                
+        except Exception as e:
+            logging.error(f"Error in progress display: {e}")
+    
+    def run(self) -> int:
+        """
+        Run the backup process.
+        
+        Returns:
+            0 for success, non-zero for failure
+        """
+        start_time = datetime.now()
+        logging.info(f"Starting backup at {start_time}")
+        logging.info(f"Source: {self.source_dir}")
+        logging.info(f"Destination: {self.dest_dir}")
+        
+        # Create lock file
+        if not self._create_lock():
+            return 1
+        
+        try:
+            # Validate directories
+            if not self._validate_directories():
+                return 2
+            
+            # Display initial disk space
+            src_space = self._get_disk_space(self.source_dir)
+            dest_space = self._get_disk_space(self.dest_dir)
+            src_size = self._get_dir_size(self.source_dir)
+            dest_size = self._get_dir_size(self.dest_dir)
+            
+            logging.info(
+                f"Source: {src_size['file_count']} files, {src_size['size_human']} | "
+                f"Destination: {dest_size['file_count']} files, {dest_size['size_human']}"
+            )
+            logging.info(
+                f"Disk space - Source: {src_space['used_human']}/{src_space['total_human']} "
+                f"({src_space['used_percent']}%) | "
+                f"Destination: {dest_space['used_human']}/{dest_space['total_human']} "
+                f"({dest_space['used_percent']}%)"
+            )
+            
+            # Build and execute rsync command
+            cmd = self._build_rsync_command()
+            logging.info(f"Running rsync command: {' '.join(cmd)}")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                bufsize=1  # Line buffered
+            )
+            
+            # Start progress display thread
+            stop_event = threading.Event()
+            progress_thread = threading.Thread(
+                target=self._display_progress,
+                args=(process, stop_event)
+            )
+            progress_thread.daemon = True
+            progress_thread.start()
+            
+            # Monitor the process and log progress
+            for line in process.stdout:
+                line = line.strip()
+                if line:
+                    if "to-chk=" in line or "%" in line:
+                        # This is a progress line, print to console and log as info
+                        print(line, flush=True)
+                        logging.info(line)
+                    else:
+                        # Regular output, log as debug
+                        logging.debug(line)
+            
+            # Wait for process to complete
+            return_code = process.wait()
+            
+            # Stop progress display thread
+            stop_event.set()
+            if progress_thread.is_alive():
+                progress_thread.join(timeout=2)
+            
+            # Display final disk space
+            src_space = self._get_disk_space(self.source_dir)
+            dest_space = self._get_disk_space(self.dest_dir)
+            src_size = self._get_dir_size(self.source_dir)
+            dest_size = self._get_dir_size(self.dest_dir)
+            
+            logging.info(
+                f"Final state - Source: {src_size['file_count']} files, {src_size['size_human']} | "
+                f"Destination: {dest_size['file_count']} files, {dest_size['size_human']}"
+            )
+            
+            # Log the result
+            if return_code == 0:
+                end_time = datetime.now()
+                duration = end_time - start_time
+                logging.info(f"Backup completed successfully at {end_time} (Duration: {duration})")
+                return 0
+            else:
+                error_output = process.stderr.read()
+                logging.error(f"Backup failed with return code {return_code}")
+                logging.error(f"Error output: {error_output}")
+                return return_code
+            
+        except Exception as e:
+            logging.error(f"An unexpected error occurred: {e}")
+            return 3
+        finally:
+            # Always remove the lock file
+            self._remove_lock()
 
-def backup_and_delete(source_folder, destination_folder):
-  """
-  Back up files and delete them
-  Args:
-      source_folder: path to the original location
-      destination_folder: path to backup location
-  """
-  # Ensure source and destination folders exist
-  if not os.path.exists(source_folder):
-      print(f"Source folder '{source_folder}' does not exist.")
-      return
-  if not os.path.exists(destination_folder):
-      os.makedirs(destination_folder)
-      print(f"Created destination folder '{destination_folder}'.")
-  try:
-      # Copy the contents of the source folder to the destination folder
-      for item in os.listdir(source_folder):
-          src_path = os.path.join(source_folder, item)
-          dest_path = os.path.join(destination_folder, item)
-          if os.path.isdir(src_path):
-              shutil.copytree(src_path, dest_path)
-          else:
-              shutil.copy2(src_path, dest_path)
-      print(f"All contents of '{source_folder}' successfully copied to '{destination_folder}'.")
-      # Verify the copy
-      src_items = set(os.listdir(source_folder))
-      dest_items = set(os.listdir(destination_folder))
-      if not src_items.issubset(dest_items):
-          print("Error: Not all items were copied successfully.")
-          return
-      # Delete the contents of the source folder
-      for item in os.listdir(source_folder):
-          src_path = os.path.join(source_folder, item)
-          if os.path.isdir(src_path):
-              shutil.rmtree(src_path)
-          else:
-              os.remove(src_path)
-      print(f"All contents of '{source_folder}' have been deleted.")
-  except Exception as e:
-      print(f"An error occurred: {e}")
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Optimized photo backup for Raspberry Pi with exFAT SD card'
+    )
+    
+    parser.add_argument(
+        '--src',
+        required=True,
+        help='Source directory containing photos to back up'
+    )
+    
+    parser.add_argument(
+        '--dest',
+        required=True,
+        help='Destination directory where photos will be copied'
+    )
+    
+    parser.add_argument(
+        '--bwlimit',
+        type=int,
+        default=DEFAULT_BANDWIDTH_LIMIT,
+        help=f'Bandwidth limit in KB/s (default: {DEFAULT_BANDWIDTH_LIMIT})'
+    )
+    
+    parser.add_argument(
+        '--log-file',
+        default=DEFAULT_LOG_FILE,
+        help=f'Path to log file (default: {DEFAULT_LOG_FILE})'
+    )
+    
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Display verbose output'
+    )
+    
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Main entry point for the script."""
+    args = parse_arguments()
+    
+    backup = PhotoBackup(
+        source_dir=args.src,
+        dest_dir=args.dest,
+        bandwidth_limit=args.bwlimit,
+        log_file=args.log_file,
+        verbose=args.verbose
+    )
+    
+    return backup.run()
 
 
 if __name__ == "__main__":
-    # Check if "photos" folder exists
-    if not os.path.exists(photos_folder):
-        print("Photos folder not found, exiting.")
-        exit(1)
-    # Get total and available space on desktop and external storage
-    desktop_total, desktop_available = get_storage_info(desktop_path)
-    print("Desktop Total    Storage: \t" + str(desktop_total))
-    print("Desktop Available Storage: \t" + str(desktop_available))
-
-    """
-  Finds storage capacity of all external drives and ranks them by size.
-  """
-    disks = {}  # Dictionary to store disk name and capacity
-    # Check potential mount points for external drives (adjust based on your system)
-    for mount_point in os.listdir("/media/pi"):
-        path = Path(f"/media/pi/{mount_point}")
-        if path.is_dir() and is_mounted(path):
-            total_size, available_size = get_storage_info(path)
-            disks[path] = total_size, available_size
-
-    # Sort disks by capacity (descending)
-    # Check if any disks were found before sorting and printing
-    print("~~~sorting disks~~~~~~")
-    if disks:
-        sorted_disks = sorted(disks.items(), key=lambda item: item[1][0], reverse=True)
-        print("External Drives (Ranked by Total Size - Descending):")
-        for disk_name, capacity in sorted_disks:
-            print(
-                f"{disk_name}: total size {capacity[0]} GB - available size {capacity[1]} GB"
-            )
-    else:
-        print("No external drives found.")
-        print(
-            "stuff never worked out with this backup, your files are not properly backedup"
-        )
-
-        exit(1)
-    print("~~~sorted~~~~~~")
-    thingsworkedok = False
-    # this is the loop where we make stuff happen
-    # iterate through the disks, starting with the largest
-    # see if it has enough available space, if not, choose the next largest
-    for disk_name, capacity in sorted_disks:
-        print("chosen Disk: "+str(disk_name))
-        total_available, external_available = capacity
-        print("total available \t"+str(total_available)) 
-        # Check if external storage has more available space than desktop
-        dir_path = photos_folder
-        total_size_bytes = get_dir_size(dir_path)
-        print("total needed \t\t"+str(total_size_bytes))
-        if external_available > total_size_bytes:
-            # Create backup folder on external storage
-            external_backup_folder = disk_name / backup_folder_name
-            print("doing the backup...")
-            #using the non-rsync way for now because rsync was giving errors
-            
-            copy_photos_to_backup(photos_folder, external_backup_folder)
-            print(f"Photos successfully copied to external backup folder: {external_backup_folder}")            
-
-
-            external_logs_folder = disk_name / "logs"
-            copy_photos_to_backup(logs_folder,external_logs_folder)
-            print(f"Logs successfully copied to external backup folder: {external_backup_folder}")            
-
-            differences = verify_copy(photos_folder, external_backup_folder)
-            if differences:
-              print("Differences found:")
-              for difference in differences:
-                print(difference)
-            else:
-              print("Copy verification successful! No differences found.")
-              print("moving original files to backedup_photos_folder")
-              move_folder_contents(photos_folder, backedup_photos_folder)
-              print(f"Photos successfully copied to internal backup folder: {backedup_photos_folder}")
-            thingsworkedok=True
-            if(thingsworkedok):
-                # After we backed up, we can check on our internal storage and see if we need to clean up
-                # Check if internal storage has less than X GB left
-                x = internal_storage_minimum
-                if desktop_available < x * 1024**3:  # x GB in bytes
-                    delete_folder_contents(backedup_photos_folder)
-                    print(
-                        "Original photos deleted after being backed up due to low internal storage."
-                    )
-                else:
-                    print(
-                        "More than "
-                        + str(x)
-                        + "GB remain so original files are also kept in internal storage after backing up to external storage"
-                    )
-                print("we have finished backing up! yay!")
-                break
-        else:
-            print("This External storage doesn't have enough space for backup.\n Trying next available storage if there is one ")
-    if thingsworkedok == False:
-        print("stuff never worked out with this backup, your files are not properly backedup")
-    else:
-        print("stuff worked out BACKUP COMPLETE")
-    print("end")
-quit()
+    sys.exit(main())

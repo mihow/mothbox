@@ -1,0 +1,30 @@
+# photo-backup.timer
+# Place this file in /etc/systemd/system/
+
+[Unit]
+Description=Run Photo Backup on Schedule
+
+[Timer]
+# Start 5 minutes after boot
+OnBootSec=5min
+# Run every 30 minutes
+OnUnitActiveSec=30min
+# Accuracy of the timer
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+
+# -----------------------------------
+
+# To enable and start the timer:
+# sudo systemctl daemon-reload
+# sudo systemctl enable photo-backup.timer
+# sudo systemctl start photo-backup.timer
+#
+# To run the service manually once:
+# sudo systemctl start photo-backup.service
+#
+# To check status:
+# sudo systemctl status photo-backup.service
+# sudo systemctl list-timers photo-backup.timer
