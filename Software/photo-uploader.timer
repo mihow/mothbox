@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Photo Upload every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=1s
+Unit=photo-uploader.service
+
+[Install]
+WantedBy=timers.target

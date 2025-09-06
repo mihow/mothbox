@@ -1,0 +1,30 @@
+[Unit]
+Description=Photo Upload Service using s5cmd
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/home/pi/Desktop/mothbox-mihow/Software/photo_uploader.py
+# Don't wait for long initial sync when restarting
+RemainAfterExit=yes
+TimeoutStartSec=600
+User=pi
+Group=pi
+# Log to systemd journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=photo-uploader
+
+# Environment variables for S3 configuration
+# s5cmd uses ~/.aws/credentials by default
+# Optionally specify a profile: Environment=AWS_PROFILE=your-profile-name
+Environment=S3_ENDPOINT_URL=https://object-arbutus.cloud.computecanada.ca
+Environment=S3_BUCKET=ami-trapdata
+Environment=S3_PREFIX=michael/portland/mb-01
+Environment=S3_LOCAL_DIR=/home/pi/Desktop/Mothbox/photos
+
+[Install]
+WantedBy=multi-user.target
