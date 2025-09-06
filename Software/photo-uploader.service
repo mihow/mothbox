@@ -7,7 +7,10 @@ StartLimitBurst=3
 
 [Service]
 Type=oneshot
-ExecStart=/home/pi/Desktop/mothbox-mihow/Software/photo_uploader.py
+# Start quickly with check-only mode (just verifies connectivity without syncing)
+ExecStart=/home/pi/Desktop/mothbox-mihow/Software/photo_uploader.py --check-only
+# Then run the full sync in the background
+ExecStartPost=/home/pi/Desktop/mothbox-mihow/Software/photo_uploader.py
 # Don't wait for long initial sync when restarting
 RemainAfterExit=yes
 TimeoutStartSec=600

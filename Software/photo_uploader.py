@@ -5,6 +5,7 @@ import subprocess
 import logging
 from pathlib import Path
 import time
+import sys
 
 # Configure logging - print to console, let systemd handle file logging
 logging.basicConfig(
@@ -111,7 +112,9 @@ def run_s5cmd_sync(directory: Path, s3_path: str, endpoint_url: Optional[str]) -
     Returns:
         True if sync successful, False otherwise
     """
-    cmd: List[str] = ['s5cmd', 'sync', str(directory), s3_path]
+    # Use directory/* to sync contents rather than the directory itself
+    # This prevents creating a nested directory structure on S3
+    cmd: List[str] = ['s5cmd', 'sync', f"{str(directory)}/*", s3_path]
     
     # Set up environment for s5cmd
     env = os.environ.copy()
@@ -135,6 +138,9 @@ def main() -> int:
     Returns:
         0 if successful, 1 if errors occurred
     """
+    # Check if running in check-only mode
+    check_only = "--check-only" in sys.argv
+    
     try:
         # Check for network connectivity
         if not wait_for_network():
@@ -146,6 +152,7 @@ def main() -> int:
         logging.info(f"  Local directory: {LOCAL_DIR}")
         logging.info(f"  S3 path: {S3_PATH}")
         logging.info(f"  Endpoint URL: {S3_ENDPOINT_URL or 'default'}")
+        logging.info(f"  Check-only mode: {check_only}")
         
         # Verify directory exists
         if not LOCAL_DIR.exists():
@@ -156,6 +163,11 @@ def main() -> int:
         if not test_s3_access(S3_PATH, S3_ENDPOINT_URL):
             logging.error("S3 bucket access test failed, skipping sync")
             return 1
+            
+        # If check-only mode, exit here after running tests
+        if check_only:
+            logging.info("Check-only mode, skipping sync operation")
+            return 0
             
         # Run s5cmd sync
         if not run_s5cmd_sync(LOCAL_DIR, S3_PATH, S3_ENDPOINT_URL):
